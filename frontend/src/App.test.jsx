@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -335,6 +335,44 @@ describe("移交记录", () => {
     expect(list).toHaveTextContent("从行车台交给施工台");
     expect(list).toHaveTextContent("版本 2");
     expect(list).toHaveTextContent("2026-09-15 11:00:00");
+  });
+
+  it("说明含表情符号时按字符计数，200 字可完整输入并上送", async () => {
+    let submittedNote = null;
+    setFetchHandler(async (url, options = {}) => {
+      if (options.method === "POST") {
+        submittedNote = JSON.parse(options.body).handover_note;
+        return jsonResponse(200, { holder: "TRAFFIC", version: 1 });
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, []);
+      }
+      return jsonResponse(200, { holder: "CONSTRUCTION", version: 0 });
+    });
+
+    render(<App />);
+    await waitUntilLoaded();
+
+    const input = screen.getByTestId("note-input");
+
+    // 200 个表情符号：按码点算是 200 字，必须完整保留（maxLength 会误判为 400）。
+    fireEvent.change(input, { target: { value: "😀".repeat(200) } });
+    expect([...input.value].length).toBe(200);
+
+    // 超出 200 字的部分被截断，而不是整段丢弃。
+    fireEvent.change(input, { target: { value: "😀".repeat(201) } });
+    expect([...input.value].length).toBe(200);
+
+    // 中文与表情混合：199 个汉字 + 1 个表情 = 200 字。
+    fireEvent.change(input, { target: { value: "施".repeat(199) + "😀" } });
+    expect([...input.value].length).toBe(200);
+
+    // 200 字说明原样随移交请求上送。
+    await userEvent.click(screen.getByTestId("transfer-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("holder")).toHaveTextContent("行车台")
+    );
+    expect(submittedNote).toBe("施".repeat(199) + "😀");
   });
 
   it("记录接口故障只在记录区提示，令牌状态与移交操作不受影响", async () => {

@@ -15,6 +15,13 @@ const HOLDER_LABELS = {
 const CONFLICT_NOTICE = "状态已变化，请重新确认";
 const NOTE_MAX_LENGTH = 200;
 
+// 与服务端 max_length 同口径：按 Unicode 码点计数字数。
+// 表情符号等在 UTF-16 中是代理对，String.length / maxLength 会算成 2，
+// 用码点迭代才能保证“200 字”对表情符号也成立。
+function clampNote(value) {
+  return [...value].slice(0, NOTE_MAX_LENGTH).join("");
+}
+
 function holderLabel(holder) {
   return HOLDER_LABELS[holder] ?? holder;
 }
@@ -150,11 +157,10 @@ export default function App() {
             <textarea
               data-testid="note-input"
               rows={2}
-              maxLength={NOTE_MAX_LENGTH}
               value={note}
               placeholder="例如：施工结束，区间空闲"
               disabled={transferring}
-              onChange={(event) => setNote(event.target.value)}
+              onChange={(event) => setNote(clampNote(event.target.value))}
             />
           </label>
 

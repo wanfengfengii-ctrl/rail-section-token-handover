@@ -118,6 +118,41 @@ def test_note_length_boundary(api_server):
         assert records[0]["note"] == "x" * 200
 
 
+def test_note_with_emoji_counts_full_200_chars(api_server):
+    """表情符号按 1 字计：200 个表情合法并完整落库，201 个整单 422。"""
+    with httpx.Client(base_url=api_server.base_url, timeout=10) as client:
+        ok = transfer(
+            client,
+            api_server.base_url,
+            {
+                "expected_version": 0,
+                "target_holder": "TRAFFIC",
+                "handover_note": "😀" * 200,
+            },
+        )
+        assert ok.status_code == 200
+
+        too_long = transfer(
+            client,
+            api_server.base_url,
+            {
+                "expected_version": 1,
+                "target_holder": "CONSTRUCTION",
+                "handover_note": "😀" * 201,
+            },
+        )
+        assert too_long.status_code == 422
+
+        # 200 个表情完整写入记录，一个不少。
+        records = get_records(client, api_server.base_url)
+        assert len(records) == 1
+        assert records[0]["note"] == "😀" * 200
+        assert get_state(client, api_server.base_url) == {
+            "holder": "TRAFFIC",
+            "version": 1,
+        }
+
+
 # ---------------------------------------------------------------------------
 # 原子一致：记录数 == 成功移交次数，版本一一对应
 # ---------------------------------------------------------------------------
