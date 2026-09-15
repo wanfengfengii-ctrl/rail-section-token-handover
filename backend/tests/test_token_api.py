@@ -136,6 +136,21 @@ def test_missing_fields_return_422(api_server):
 
 def test_illegal_target_returns_422_without_mutation(api_server):
     with httpx.Client(base_url=api_server.base_url, timeout=10) as client:
+        # 不得弱类型强转：bool/字符串/浮点版本号一律 422，状态不变。
+        for raw_version in (False, True, "0", "1", 0.0, 1.0, 1.5):
+            resp = client.post(
+                f"{api_server.base_url}/api/token/transfer",
+                json={"expected_version": raw_version, "target_holder": "TRAFFIC"},
+            )
+            assert resp.status_code == 422, raw_version
+
+        # null 版本号同样拒绝。
+        resp = client.post(
+            f"{api_server.base_url}/api/token/transfer",
+            json={"expected_version": None, "target_holder": "TRAFFIC"},
+        )
+        assert resp.status_code == 422
+
         # 不在两个合法持有人之内。
         bad_value = client.post(
             f"{api_server.base_url}/api/token/transfer",

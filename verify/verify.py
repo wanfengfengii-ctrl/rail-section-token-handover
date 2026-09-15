@@ -53,6 +53,21 @@ def request(method: str, path: str, payload=None) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read().decode() or "{}")
 
 
+def raw_transfer(raw_body: str) -> tuple[int, dict]:
+    """发送原始 JSON 文本，精确控制 expected_version 的 JSON 类型。"""
+    req = urllib.request.Request(
+        f"{API_URL}/api/token/transfer",
+        data=raw_body.encode(),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode() or "{}")
+
+
 def wait_for_api() -> None:
     for _ in range(60):
         try:
@@ -101,6 +116,22 @@ def main() -> int:
     ):
         code, _ = transfer(payload)
         check(f"422: {label}", code == 422, f"got {code}")
+
+    # 弱类型版本号：false / 字符串 / 浮点数不得被强转为版本号而成功转移。
+    for label, raw_version in (
+        ("false", "false"),
+        ("true", "true"),
+        ("字符串 \"0\"", '"0"'),
+        ("浮点 0.0", "0.0"),
+        ("浮点 1.5", "1.5"),
+        ("null", "null"),
+    ):
+        body = (
+            f'{{"expected_version": {raw_version}, '
+            f'"target_holder": "{OTHER[holder]}"}}'
+        )
+        code, _ = raw_transfer(body)
+        check(f"422: 弱类型版本号 {label}", code == 422, f"got {code}")
 
     _, unchanged = request("GET", "/api/token")
     check("422 失败请求均未改写状态", unchanged == {"holder": holder, "version": version})
