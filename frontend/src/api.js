@@ -4,6 +4,8 @@
  * 并发口径全部在后端保证，前端只做两件事：
  *  1. 每次移交都把“页面当前看到的版本号”作为 expected_version 上送；
  *  2. 收到 409 立即放弃本次意图，重新读取服务器最新状态。
+ *
+ * 移交记录是辅助信息：读取失败只影响记录区，不阻断令牌主流程。
  */
 
 export class ConflictError extends Error {
@@ -41,14 +43,21 @@ export async function fetchToken() {
   return { holder: data.holder, version: data.version };
 }
 
-export async function transferToken(expectedVersion, targetHolder) {
+export async function transferToken(expectedVersion, targetHolder, handoverNote) {
+  const payload = {
+    expected_version: expectedVersion,
+    target_holder: targetHolder,
+  };
+  // 说明为空时保持原契约：请求体不携带 handover_note 字段。
+  const note = typeof handoverNote === "string" ? handoverNote.trim() : "";
+  if (note) {
+    payload.handover_note = note;
+  }
+
   const response = await fetch("/api/token/transfer", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      expected_version: expectedVersion,
-      target_holder: targetHolder,
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (response.status === 409) {
@@ -67,6 +76,16 @@ export async function transferToken(expectedVersion, targetHolder) {
 
   const data = await response.json();
   return { holder: data.holder, version: data.version };
+}
+
+export async function fetchHandovers() {
+  const response = await fetch("/api/token/handovers", {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`读取移交记录失败：HTTP ${response.status}`);
+  }
+  return await response.json();
 }
 
 export const OTHER_HOLDER = {

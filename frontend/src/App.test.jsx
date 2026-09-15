@@ -36,8 +36,13 @@ describe("令牌页面", () => {
 
   it("首次加载展示当前持有人与单调版本号", async () => {
     setFetchHandler(async (url) => {
-      expect(url).toBe("/api/token");
-      return jsonResponse(200, { holder: "CONSTRUCTION", version: 0 });
+      if (url === "/api/token") {
+        return jsonResponse(200, { holder: "CONSTRUCTION", version: 0 });
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, []);
+      }
+      throw new Error(`unexpected url: ${url}`);
     });
 
     render(<App />);
@@ -54,11 +59,15 @@ describe("令牌页面", () => {
   it("移交成功后持有人翻转、版本号加一，且请求带 expected_version", async () => {
     const fetchMock = setFetchHandler(async (url, options = {}) => {
       if (options.method === "POST") {
+        // 未填写说明时请求体保持原契约，不携带 handover_note。
         expect(JSON.parse(options.body)).toEqual({
           expected_version: 0,
           target_holder: "TRAFFIC",
         });
         return jsonResponse(200, { holder: "TRAFFIC", version: 1 });
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, []);
       }
       return jsonResponse(200, { holder: "CONSTRUCTION", version: 0 });
     });
@@ -98,6 +107,9 @@ describe("令牌页面", () => {
     const fetchMock = setFetchHandler(async (url, options = {}) => {
       if (url === "/api/token" && options.method !== "POST") {
         return getCalls();
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, []);
       }
       // 旧页面拿着 version 0 提交：版本已被另一浏览器推进到 1。
       transferred = true;
@@ -158,6 +170,9 @@ describe("令牌页面", () => {
             current: { holder: "TRAFFIC", version: 1 },
           });
         }
+        if (url === "/api/token/handovers") {
+          return jsonResponse(200, []);
+        }
         // B 冲突后重新读取，看到的是 A 提交后的唯一状态。
         return jsonResponse(200, states.A ?? { holder: "CONSTRUCTION", version: 0 });
       };
@@ -209,5 +224,163 @@ describe("令牌页面", () => {
     utilsA.unmount();
     utilsB.unmount();
     fetchMock.mockRestore();
+  });
+});
+
+describe("移交记录", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("带说明移交成功后，记录区立即展示从哪台到哪台、版本、说明与记录时间", async () => {
+    const record = {
+      from_holder: "CONSTRUCTION",
+      to_holder: "TRAFFIC",
+      version: 1,
+      note: "施工结束，区间空闲",
+      created_at: "2026-09-15T10:20:30.123456+00:00",
+    };
+    let transferred = false;
+
+    const fetchMock = setFetchHandler(async (url, options = {}) => {
+      if (options.method === "POST") {
+        // 填写的说明随请求上送。
+        expect(JSON.parse(options.body)).toEqual({
+          expected_version: 0,
+          target_holder: "TRAFFIC",
+          handover_note: "施工结束，区间空闲",
+        });
+        transferred = true;
+        return jsonResponse(200, { holder: "TRAFFIC", version: 1 });
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, transferred ? [record] : []);
+      }
+      return jsonResponse(
+        200,
+        transferred
+          ? { holder: "TRAFFIC", version: 1 }
+          : { holder: "CONSTRUCTION", version: 0 }
+      );
+    });
+
+    render(<App />);
+    await waitUntilLoaded();
+
+    // 初始没有记录。
+    expect(screen.getByTestId("records-empty")).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByTestId("note-input"),
+      "施工结束，区间空闲"
+    );
+    await userEvent.click(screen.getByTestId("transfer-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("holder")).toHaveTextContent("行车台")
+    );
+
+    // 记录区同步刷新，完整展示最新一条移交记录。
+    const list = await screen.findByTestId("records-list");
+    expect(list).toHaveTextContent("从施工台交给行车台");
+    expect(list).toHaveTextContent("版本 1");
+    expect(list).toHaveTextContent("施工结束，区间空闲");
+    expect(list).toHaveTextContent("2026-09-15 10:20:30");
+
+    // 说明输入框在成功后清空，便于下一次填写。
+    expect(screen.getByTestId("note-input")).toHaveValue("");
+
+    // 成功后确实重新拉取了记录接口。
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === "/api/token/handovers")
+          .length
+      ).toBeGreaterThanOrEqual(2)
+    );
+  });
+
+  it("手动刷新同步更新记录区", async () => {
+    const record = {
+      from_holder: "TRAFFIC",
+      to_holder: "CONSTRUCTION",
+      version: 2,
+      note: null,
+      created_at: "2026-09-15T11:00:00+00:00",
+    };
+    let recordVisible = false;
+
+    setFetchHandler(async (url, options = {}) => {
+      if (options.method === "POST") {
+        throw new Error("本用例不发生移交");
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(200, recordVisible ? [record] : []);
+      }
+      return jsonResponse(200, { holder: "TRAFFIC", version: 2 });
+    });
+
+    render(<App />);
+    await waitUntilLoaded();
+    expect(screen.getByTestId("records-empty")).toBeInTheDocument();
+
+    // 另一浏览器完成了移交；本页手动刷新后记录区同步展示。
+    recordVisible = true;
+    await userEvent.click(screen.getByTestId("refresh-button"));
+
+    const list = await screen.findByTestId("records-list");
+    expect(list).toHaveTextContent("从行车台交给施工台");
+    expect(list).toHaveTextContent("版本 2");
+    expect(list).toHaveTextContent("2026-09-15 11:00:00");
+  });
+
+  it("记录接口故障只在记录区提示，令牌状态与移交操作不受影响", async () => {
+    let transferred = false;
+
+    setFetchHandler(async (url, options = {}) => {
+      if (options.method === "POST") {
+        expect(JSON.parse(options.body)).toEqual({
+          expected_version: 0,
+          target_holder: "TRAFFIC",
+        });
+        transferred = true;
+        return jsonResponse(200, { holder: "TRAFFIC", version: 1 });
+      }
+      if (url === "/api/token/handovers") {
+        return jsonResponse(500, { detail: "boom" });
+      }
+      return jsonResponse(
+        200,
+        transferred
+          ? { holder: "TRAFFIC", version: 1 }
+          : { holder: "CONSTRUCTION", version: 0 }
+      );
+    });
+
+    render(<App />);
+    await waitUntilLoaded();
+
+    // 记录区提示故障，但令牌状态正常展示。
+    expect(await screen.findByTestId("records-error")).toHaveTextContent(
+      "读取移交记录失败"
+    );
+    expect(screen.getByTestId("holder")).toHaveTextContent("施工台");
+    expect(screen.getByTestId("version")).toHaveTextContent("0");
+
+    // 主流程仍可用：移交成功、持有人翻转、版本加一。
+    await userEvent.click(screen.getByTestId("transfer-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("holder")).toHaveTextContent("行车台")
+    );
+    expect(screen.getByTestId("version")).toHaveTextContent("1");
+
+    // 故障没有扩散成整页错误，仍只停留在记录区。
+    expect(screen.getByTestId("records-error")).toBeInTheDocument();
+    expect(screen.getByTestId("transfer-button")).toHaveTextContent(
+      "移交给施工台"
+    );
   });
 });

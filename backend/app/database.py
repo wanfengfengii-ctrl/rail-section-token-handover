@@ -79,6 +79,8 @@ class Database:
         """建表；表为空时插入唯一初始行 (CONSTRUCTION, 0)。
 
         重复调用（含两个进程同时首启）是幂等的：已有行不会被重置。
+        旧库启动时自动补建缺失的移交记录表（含不可修改触发器），
+        令牌状态行原样保留。
         """
 
         Base.metadata.create_all(bind=self.engine)

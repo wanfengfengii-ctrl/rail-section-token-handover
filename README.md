@@ -58,7 +58,8 @@ docker compose down -v     # 连数据卷一起删除（下次启动重新初始
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/api/token` | 读取当前持有人与版本号 |
-| `POST` | `/api/token/transfer` | 移交令牌 |
+| `POST` | `/api/token/transfer` | 移交令牌（可附 `handover_note` 说明） |
+| `GET` | `/api/token/handovers` | 最近 10 条移交记录，按版本倒序 |
 
 ### `GET /api/token`
 
@@ -73,12 +74,14 @@ docker compose down -v     # 连数据卷一起删除（下次启动重新初始
 请求体：
 
 ```json
-{ "expected_version": 0, "target_holder": "TRAFFIC" }
+{ "expected_version": 0, "target_holder": "TRAFFIC", "handover_note": "施工结束，区间空闲" }
 ```
 
 - `expected_version`（必填，非负整数）：发起方看到的版本号；
 - `target_holder`（必填）：目标持有人，只能是 `CONSTRUCTION` / `TRAFFIC`，
-  且必须与当前持有人**相反**（施工台 ⇄ 行车台，不能交给自己）。
+  且必须与当前持有人**相反**（施工台 ⇄ 行车台，不能交给自己）；
+- `handover_note`（可选，不超过 200 字）：移交说明，随本次移交写入
+  不可修改的移交记录；省略时按原契约处理，记录的说明为空。
 
 成功（200）—— 持有人翻转，版本号**恰好加一**：
 
@@ -95,11 +98,37 @@ docker compose down -v     # 连数据卷一起删除（下次启动重新初始
 }
 ```
 
-请求不合法（422）：字段缺失、字段多余、类型/范围非法、`target_holder`
-不是两个合法值之一，或目标与当前持有人相同。**`expected_version` 只接受
-JSON 整数**——布尔（`false`/`true`，Pydantic 默认会把 `false` 强转成 0）、
-字符串（`"0"`）、浮点数（`0.0`）一律 422，不会借类型强转蒙混出版本号。
-**所有失败都不会改写状态。**
+请求不合法（422）：字段缺失、字段多余、类型/范围非法、`handover_note`
+超过 200 字、`target_holder` 不是两个合法值之一，或目标与当前持有人相同。
+**`expected_version` 只接受 JSON 整数**——布尔（`false`/`true`，Pydantic
+默认会把 `false` 强转成 0）、字符串（`"0"`）、浮点数（`0.0`）一律 422，
+不会借类型强转蒙混出版本号。**所有失败都不会改写状态，也不会留下移交记录。**
+
+### `GET /api/token/handovers`
+
+返回最近 10 条移交记录，按版本倒序（最新在前）：
+
+```json
+[
+  {
+    "from_holder": "CONSTRUCTION",
+    "to_holder": "TRAFFIC",
+    "version": 1,
+    "note": "施工结束，区间空闲",
+    "created_at": "2026-09-15T10:20:30.123456+00:00"
+  }
+]
+```
+
+- `from_holder` / `to_holder`：从哪一台交给哪一台；
+- `version`：本次移交**提交后**的令牌版本号；
+- `note`：移交说明（未填写时为 `null`）；
+- `created_at`：服务端记录时间（UTC，ISO 8601）。
+
+每次成功移交在**更新唯一令牌的同一数据库事务**内追加一条记录；记录
+只增不改（数据库触发器拒绝 UPDATE/DELETE），任何 409、422 或事务失败
+都会整体回滚，不留下记录。已有数据库启动时自动补建记录表，令牌状态
+不会被重置。
 
 ### 前端在 409 时的行为
 
@@ -108,6 +137,14 @@ JSON 整数**——布尔（`false`/`true`，Pydantic 默认会把 `false` 强�
 3. 提示 **“状态已变化，请重新确认”**，由调度员重新确认后再操作。
 
 页面每 5 秒静默刷新一次，让另一浏览器的移交结果可见；移交进行中暂停刷新。
+
+### 移交说明与记录区
+
+- 移交按钮旁可填写可选说明（不超过 200 字），随移交请求一并上送；
+- 页面初次加载、点击“刷新状态”、移交成功后都会同步刷新记录区，
+  展示最近 10 条记录：从哪一台交给哪一台、提交后的版本号、说明与
+  服务端记录时间；
+- 记录读取失败只在记录区提示，当前令牌状态与移交操作不受影响。
 
 ---
 
@@ -159,7 +196,7 @@ pip install -r requirements-dev.txt
 TOKEN_DATABASE_URL="sqlite:///./token.db" \
   uvicorn app.asgi:app --reload --port 8000
 
-pytest            # 9 项：初始化 / 422 / 409 / 8 路并发 / 杀进程重启
+pytest            # 18 项：初始化 / 422 / 409 / 8 路并发 / 杀进程重启 / 移交记录
 ```
 
 pytest 用真实 `uvicorn` 子进程 + HTTP 请求验证；“重启”测试会终止子进程、
@@ -171,7 +208,7 @@ pytest 用真实 `uvicorn` 子进程 + HTTP 请求验证；“重启”测试会
 cd frontend
 npm install
 npm run dev       # http://localhost:5173，/api 自动代理到 :8000
-npm test          # Vitest：渲染、成功移交、409 冲突反馈、双浏览器场景
+npm test          # Vitest：渲染、成功移交、409 冲突反馈、双浏览器场景、记录区刷新与故障隔离
 npm run build
 ```
 

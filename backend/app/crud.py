@@ -1,4 +1,4 @@
-"""令牌状态的读写逻辑。
+"""令牌状态的读写与移交记录的写入逻辑（记录读取见 main.py 只读接口）。
 
 移交在单个数据库事务中完成：
 
@@ -6,19 +6,22 @@
 2. 读取唯一一行当前状态；
 3. 校验 ``expected_version`` 与当前版本一致、目标与当前持有人相反；
 4. 用带 ``WHERE id = 1 AND version = :expected`` 的条件 UPDATE 落库，
-   成功时版本号恰好加一。
+   成功时版本号恰好加一；
+5. 在同一事务内追加一条不可修改的移交记录（从哪台到哪台、提交后版本号、
+   说明、服务端记录时间）。
 
-任一步失败都回滚，状态不被改写。并发事务被 SQLite 写锁串行化，
+任一步失败都回滚，状态不被改写、记录也不留痕：409/422 在写入前抛出，
+提交失败则令牌更新与记录一起回滚。并发事务被 SQLite 写锁串行化，
 因此同一版本的两次移交只会有一次条件更新命中。
 """
 
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from .models import TokenState
+from .models import HandoverRecord, TokenState
 
 Holder = Literal["CONSTRUCTION", "TRAFFIC"]
 
@@ -52,8 +55,9 @@ def transfer_token(
     db: Session,
     expected_version: int,
     target_holder: str,
+    handover_note: str | None = None,
 ) -> TokenSnapshot:
-    """在调用方提供的会话/事务中完成校验与移交。"""
+    """在调用方提供的会话/事务中完成校验、移交与记录追加。"""
 
     state = db.get(TokenState, 1)
     if state is None:
@@ -69,6 +73,9 @@ def transfer_token(
     if target_holder == state.holder:
         raise IllegalTargetError
 
+    from_holder = state.holder
+    new_version = expected_version + 1
+
     # 条件更新作为第二道保险：即使锁语义被绕过，版本不匹配也命中 0 行。
     result = db.execute(
         update(TokenState)
@@ -80,4 +87,15 @@ def transfer_token(
             TokenSnapshot(holder=state.holder, version=state.version)
         )
 
-    return TokenSnapshot(holder=target_holder, version=expected_version + 1)
+    # 与令牌更新同事务追加移交记录；任一步失败两者一起回滚，不留半吊子。
+    db.add(
+        HandoverRecord(
+            from_holder=from_holder,
+            to_holder=target_holder,
+            version=new_version,
+            note=handover_note,
+        )
+    )
+    db.flush()
+
+    return TokenSnapshot(holder=target_holder, version=new_version)

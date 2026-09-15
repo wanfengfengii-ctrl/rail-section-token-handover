@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ConflictError,
   OTHER_HOLDER,
+  fetchHandovers,
   fetchToken,
   transferToken,
 } from "./api.js";
@@ -12,6 +13,18 @@ const HOLDER_LABELS = {
 };
 
 const CONFLICT_NOTICE = "状态已变化，请重新确认";
+const NOTE_MAX_LENGTH = 200;
+
+function holderLabel(holder) {
+  return HOLDER_LABELS[holder] ?? holder;
+}
+
+function formatRecordTime(iso) {
+  // 服务端返回 UTC ISO 串；去掉 T 与微秒部分，便于阅读与核对。
+  return typeof iso === "string"
+    ? iso.replace("T", " ").replace(/\.\d+/, "")
+    : "";
+}
 
 export default function App() {
   const [token, setToken] = useState(null);
@@ -19,6 +32,10 @@ export default function App() {
   const [pageError, setPageError] = useState("");
   const [notice, setNotice] = useState("");
   const [transferring, setTransferring] = useState(false);
+  const [note, setNote] = useState("");
+  // 移交记录是辅助信息：故障只在记录区提示，不影响令牌主流程。
+  const [records, setRecords] = useState([]);
+  const [recordsError, setRecordsError] = useState("");
   // 本次移交意图使用发起时看到的版本号；409 后意图作废。
   const intentVersionRef = useRef(null);
 
@@ -29,6 +46,16 @@ export default function App() {
       setPageError("");
     } catch (err) {
       setPageError(err.message);
+    }
+  }, []);
+
+  const refreshRecords = useCallback(async () => {
+    try {
+      const latest = await fetchHandovers();
+      setRecords(latest);
+      setRecordsError("");
+    } catch (err) {
+      setRecordsError(err.message);
     }
   }, []);
 
@@ -48,10 +75,12 @@ export default function App() {
         }
       }
     })();
+    // 初次加载同步记录区；失败只在记录区提示。
+    refreshRecords();
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshRecords]);
 
   // 两个浏览器同时操作时，定时拉取让另一侧的移交结果可见（不改变并发口径）。
   useEffect(() => {
@@ -69,8 +98,11 @@ export default function App() {
     setTransferring(true);
     setNotice("");
     try {
-      const next = await transferToken(expectedVersion, target);
+      const next = await transferToken(expectedVersion, target, note);
       setToken(next);
+      setNote("");
+      // 成功后立即刷新记录区，展示刚写入的这条移交记录。
+      await refreshRecords();
     } catch (err) {
       if (err instanceof ConflictError) {
         // 版本已被他人推进：读取服务器最新状态、取消本次意图、提示。
@@ -85,10 +117,8 @@ export default function App() {
     }
   };
 
-  const holderLabel = token ? HOLDER_LABELS[token.holder] ?? token.holder : "";
-  const targetLabel = token
-    ? HOLDER_LABELS[OTHER_HOLDER[token.holder]]
-    : "";
+  const holderText = token ? holderLabel(token.holder) : "";
+  const targetLabel = token ? holderLabel(OTHER_HOLDER[token.holder]) : "";
 
   return (
     <main className="page">
@@ -107,13 +137,26 @@ export default function App() {
           <dl>
             <div>
               <dt>当前持有人</dt>
-              <dd data-testid="holder">{holderLabel}</dd>
+              <dd data-testid="holder">{holderText}</dd>
             </div>
             <div>
               <dt>版本号</dt>
               <dd data-testid="version">{token.version}</dd>
             </div>
           </dl>
+
+          <label className="note-field">
+            <span>移交说明（可选，不超过 {NOTE_MAX_LENGTH} 字）</span>
+            <textarea
+              data-testid="note-input"
+              rows={2}
+              maxLength={NOTE_MAX_LENGTH}
+              value={note}
+              placeholder="例如：施工结束，区间空闲"
+              disabled={transferring}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
 
           <button
             type="button"
@@ -132,6 +175,7 @@ export default function App() {
             onClick={() => {
               setNotice("");
               refresh();
+              refreshRecords();
             }}
             disabled={transferring}
           >
@@ -145,6 +189,46 @@ export default function App() {
           )}
         </section>
       )}
+
+      <section className="card" aria-label="移交记录">
+        <h2>最近移交记录</h2>
+
+        {recordsError && (
+          <p className="error" role="alert" data-testid="records-error">
+            {recordsError}
+          </p>
+        )}
+
+        {!recordsError && records.length === 0 && (
+          <p className="muted" data-testid="records-empty">
+            暂无移交记录
+          </p>
+        )}
+
+        {records.length > 0 && (
+          <ul className="records" data-testid="records-list">
+            {records.map((record) => (
+              <li key={record.version} className="record">
+                <div className="record-main">
+                  <span data-testid={`record-route-${record.version}`}>
+                    从{holderLabel(record.from_holder)}交给
+                    {holderLabel(record.to_holder)}
+                  </span>
+                  <span className="record-version">
+                    版本 {record.version}
+                  </span>
+                </div>
+                {record.note && (
+                  <p className="record-note">{record.note}</p>
+                )}
+                <time dateTime={record.created_at}>
+                  {formatRecordTime(record.created_at)}
+                </time>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }
