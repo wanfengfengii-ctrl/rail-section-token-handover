@@ -1,0 +1,61 @@
+# 山区铁路区间占用令牌 —— 全栈联调编排。
+#
+# 默认只运行两个服务：
+#   docker compose up --build
+#     web: 前端页面（宿主端口可用 WEB_PORT 覆盖，默认 8080）
+#     api: FastAPI 令牌服务（宿主端口可用 API_PORT 覆盖，默认 8000）
+#
+# 一次性验收（不常驻，跑完即退出）：
+#   docker compose --profile verify run --rm verify
+# 验收全新卷：
+#   docker compose down -v && docker compose --profile verify run --rm verify
+
+services:
+  api:
+    build:
+      context: ./backend
+    image: block-token-api:latest
+    environment:
+      TOKEN_DATABASE_URL: sqlite:////data/token.db
+      CORS_ORIGINS: ""
+    volumes:
+      # 令牌唯一状态行落在命名卷；容器重建/重启后仍保留持有人与版本。
+      - token-data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: ./frontend
+    image: block-token-web:latest
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  verify:
+    # 仅在显式指定 --profile verify 时才运行；普通 up 不会启动它。
+    profiles: ["verify"]
+    build:
+      context: ./verify
+    image: block-token-verify:latest
+    environment:
+      API_URL: http://api:8000
+      DB_PATH: /data/token.db
+    volumes:
+      # 与 API 共享同一数据卷，直接核对 SQLite 落盘内容。
+      - token-data:/data
+    depends_on:
+      api:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  token-data:
